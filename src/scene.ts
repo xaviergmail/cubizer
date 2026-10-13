@@ -8,6 +8,7 @@ import {
   panelCenter,
   parsePointKey,
   panelKey,
+  panelSpan,
   type Connector,
   type PanelType,
   type Placement,
@@ -306,6 +307,11 @@ function placePanel(obj: THREE.Group, p: Placement): void {
   obj.position.set(c[0], c[1], c[2]);
   if (p.plane === 'x') obj.rotation.z = -Math.PI / 2;
   if (p.plane === 'z') obj.rotation.x = Math.PI / 2;
+  // GLB panel frame: face spans local x/z, thickness local y. The span's
+  // (a, b) axes map onto local x/z for every plane rotation, so one scale
+  // vector covers 12x12 and 16-inch panels alike.
+  const [a, b] = panelSpan(p);
+  obj.scale.set(a / STEP, 1, b / STEP);
 }
 
 // After Z-up -> Y-up normalization the connector plate is in XZ and its
@@ -597,6 +603,7 @@ export class SceneCtx {
     this.selectionHelper.visible = true;
     this.selectionHelper.position.copy(mesh.position);
     this.selectionHelper.rotation.copy(mesh.rotation);
+    this.selectionHelper.scale.copy(mesh.scale);
   }
 
   setGhost(ghost: GhostSpec | null): void {
@@ -629,9 +636,8 @@ export class SceneCtx {
     clearGroup(this.markerGroup);
     for (const candidate of candidates) {
       const obj = buildPanelContent(candidate.type, true);
-      // Ghosts sit centered in the square they would occupy.
       placePanel(obj, candidate.placement);
-      obj.scale.setScalar(0.5);
+      obj.scale.multiplyScalar(0.5);
       obj.userData.candidateKey = panelKey(candidate.placement);
       this.markerGroup.add(obj);
     }

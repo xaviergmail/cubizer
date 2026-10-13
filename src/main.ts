@@ -5,10 +5,15 @@ import {
   STEP,
   World,
   panelCenter,
+  panelCornersIn,
   panelKey,
+  baseKey,
+  spanForSize,
+  SIZE_MODES,
   sharedPanelEdge,
   type AssemblyState,
   type Placement,
+  type SizeMode,
 } from './model';
 import { SceneCtx, loadPanelAssets, connectorAnchors } from './scene';
 import { UI } from './ui';
@@ -133,6 +138,16 @@ function pickCandidate(): string | null {
 
 type BuildMode = 'normal' | 'quick';
 
+const SIZE_MODE_KEY = 'artist-alley-display-builder:size-mode';
+const storedSize = localStorage.getItem(SIZE_MODE_KEY);
+let sizeMode: SizeMode = SIZE_MODES.includes(storedSize as SizeMode) ? (storedSize as SizeMode) : '12x12';
+
+// Every placement path routes through here so validity, rendering, and keys
+// all judge the panel at the size the user currently has selected.
+function withSize(p: Placement): Placement {
+  return { ...p, span: spanForSize(p.plane, sizeMode) };
+}
+
 let buildMode: BuildMode = localStorage.getItem(QUICK_MODE_KEY) === 'true' ? 'quick' : 'normal';
 let hoverPanelKey: string | null = null;
 // Edge-hover placement is retained only by quick build mode.
@@ -153,24 +168,13 @@ const normalCandidates = new Map<string, NormalCandidate>();
 const EDGE_ACTIVATE_PX = 45; // start showing the ghost this close to an edge
 const EDGE_EXTINGUISH_PX = 130; // ghost gone beyond this distance
 const EDGE_SECTOR_DEG = 75; // mouse must sit roughly in a candidate's sector
-
-function cornerWorld(p: Placement, ci: 0 | 1 | 2 | 3): [number, number, number] {
-  const { i, j, k, plane } = p;
-  const far = ci === 2 || ci === 3;
-  const dx = ci === 1 || ci === 3 ? (plane !== 'x' ? 1 : 0) : 0;
-  const dy = (plane === 'z' || plane === 'x') && (plane === 'x' ? ci === 1 || ci === 3 : far) ? 1 : 0;
-  const dz = far && plane !== 'z' ? 1 : 0;
-  return [(i + dx) * STEP, (j + dy) * STEP, (k + dz) * STEP];
-}
-
-// The panel's 4 edges as lattice corner pairs.
 function panelEdges(p: Placement): Array<[[number, number, number], [number, number, number]]> {
-  const c = [0, 1, 2, 3].map((n) => cornerWorld(p, n as 0 | 1 | 2 | 3));
+  const c = panelCornersIn(p);
   return [
-    [c[0], c[1]],
-    [c[0], c[2]],
-    [c[1], c[3]],
-    [c[2], c[3]],
+    [c[0]!, c[1]!],
+    [c[0]!, c[2]!],
+    [c[1]!, c[3]!],
+    [c[2]!, c[3]!],
   ];
 }
 
@@ -225,11 +229,13 @@ function edgeNeighbors(p: Placement, edge: number): Placement[] {
 }
 
 function tableCandidate(point: THREE.Vector3): Placement | null {
+  const span = spanForSize('y', sizeMode);
   const candidate: Placement = {
     plane: 'y',
-    i: Math.round(point.x / STEP - 0.5),
+    i: Math.round(point.x / STEP - span[0] / (2 * STEP)),
     j: 0,
-    k: Math.round(point.z / STEP - 0.5),
+    k: Math.round(point.z / STEP - span[1] / (2 * STEP)),
+    span,
   };
   return world.canPlace(candidate) ? candidate : null;
 }
@@ -300,7 +306,7 @@ function candidatesForPanel(panel: Placement): NormalCandidate[] {
   // Normal mode mirrors quick build: only squares sharing a real edge with the
   // selected panel (coplanar continuation or perpendicular along that edge).
   // Corner-only diagonals stay placeable elsewhere but are never previewed.
-  return world.candidates().flatMap((candidate) =>
+  return world.candidates(sizeMode).flatMap((candidate) =>
     sharedPanelEdge(candidate, panel) ? [{ placement: candidate }] : [],
   );
 }
@@ -329,9 +335,11 @@ function updateEdgeGhost(mx: number, my: number): void {
   const mdx = mx - mid.x, mdy = my - mid.y;
   const mlen = Math.hypot(mdx, mdy);
   let best: { p: Placement; angle: number } | null = null;
+  const occupied = new Set([...world.panels.keys()].map((key) => key.split('@')[0]!));
   if (mlen >= 1) {
-    for (const cand of edgeNeighbors(panel, edgeHover.edge)) {
-      if (world.panel(panelKey(cand))) continue; // occupied: not a candidate
+    for (const base of edgeNeighbors(panel, edgeHover.edge)) {
+      if (occupied.has(baseKey(base))) continue; // occupied: not a candidate
+      const cand = withSize(base);
       const c = panelCenter(cand);
       const s = projectPx(c);
       if (!s.visible) continue;
@@ -348,7 +356,7 @@ function updateEdgeGhost(mx: number, my: number): void {
     // Right at the edge (or on the panel beside it): the tangential
     // (coplanar continuation) square is the default candidate.
     const coplanar = edgeNeighbors(panel, edgeHover.edge)[0];
-    if (!world.panel(panelKey(coplanar))) ghostPlacement = coplanar;
+    if (!occupied.has(baseKey(coplanar))) ghostPlacement = withSize(coplanar);
   }
   if (ghostPlacement) {
     ghostInvalid = !world.canPlace(ghostPlacement);
@@ -754,6 +762,16 @@ const ui = new UI(sidebar, viewport, {
     refresh();
     commitHistory();
   },
+  onSizeSelect: (mode) => {
+    sizeMode = mode;
+    localStorage.setItem(SIZE_MODE_KEY, mode);
+    // Clear and refresh only: re-running hover at the stale cursor position
+    // would latch an edge ghost computed against the previous size. The next
+    // pointermove computes fresh state at the real cursor.
+    clearHover();
+    clearNormalCandidates();
+    refresh();
+  },
   onQuickModeChange: (enabled) => {
     buildMode = enabled ? 'quick' : 'normal';
     localStorage.setItem(QUICK_MODE_KEY, String(enabled));
@@ -779,6 +797,7 @@ const ui = new UI(sidebar, viewport, {
 });
 sceneCtx.setPlacementMode(buildMode);
 ui.setQuickMode(buildMode === 'quick', false);
+ui.setSizeMode(sizeMode);
 
 window.addEventListener('popstate', () => {
   if (!restoreFromUrl(world)) return;

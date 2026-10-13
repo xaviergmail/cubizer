@@ -24,10 +24,37 @@ export interface Panel {
   j: number;
   k: number;
   typeId: string;
+  span?: Span;
 }
 
-export type Placement = Pick<Panel, 'plane' | 'i' | 'j' | 'k'>;
+export type Placement = Pick<Panel, 'plane' | 'i' | 'j' | 'k' | 'span'>;
 export type Corner = [number, number, number];
+// In-plane extents in inches along the plane's two varying axes, in the same
+// order panelCorners uses them. Absent = the standard 12x12 panel.
+export type Span = [number, number];
+export type SizeMode = '12x12' | '12x16' | '16x12';
+export const SIZE_MODES = ['12x12', '12x16', '16x12'] as const;
+
+// sizeMode names its dimensions width x height for standing panels; for a
+// flat (y-plane) panel "height" runs along z. A 16" dimension always extends
+// off the 12" connector lattice; its far corners therefore host no connectors.
+export function spanForSize(plane: Plane, size: SizeMode): Span {
+  if (size === '12x12') return [STEP, STEP];
+  // plane 'x' varies (y, z): its first axis is vertical, so the modes swap.
+  const [w, h] = size === '12x16' ? [STEP, 16] : [16, STEP];
+  return plane === 'x' ? [h, w] : [w, h];
+}
+
+export function panelSpan(p: Placement): Span {
+  return p.span ?? [STEP, STEP];
+}
+
+// Only 12"/16" extents with at most one 16" dimension are real products.
+export function isValidSpan(span: unknown): span is Span {
+  return Array.isArray(span) && span.length === 2
+    && span.every((v) => v === STEP || v === 16)
+    && span.filter((v) => v === 16).length <= 1;
+}
 
 export interface Connector {
   plane: Plane;
@@ -49,7 +76,11 @@ export interface AssemblyState {
   connectors: Array<{ point: Corner; plane: Plane; sign: 1 | -1; turn?: 0 | 1 | 2 | 3 }>;
 }
 
-export const panelKey = (p: Placement) => `${p.plane}:${p.i},${p.j},${p.k}`;
+export const baseKey = (p: Placement) => `${p.plane}:${p.i},${p.j},${p.k}`;
+export const panelKey = (p: Placement) => {
+  const [a, b] = panelSpan(p);
+  return a === STEP && b === STEP ? baseKey(p) : `${baseKey(p)}@${a}x${b}`;
+};
 export const pointKey = (c: Corner) => `${c[0]},${c[1]},${c[2]}`;
 
 export function parsePointKey(key: string): Corner {
@@ -57,41 +88,48 @@ export function parsePointKey(key: string): Corner {
   return [i, j, k];
 }
 
-export function panelCorners(p: Placement): Corner[] {
+// Physical corners in inches, ordered origin, +first axis, +second axis, far.
+export function panelCornersIn(p: Placement): Array<[number, number, number]> {
+  const [a, b] = panelSpan(p);
   const { i, j, k } = p;
-  if (p.plane === 'x') return [[i, j, k], [i, j + 1, k], [i, j, k + 1], [i, j + 1, k + 1]];
-  if (p.plane === 'y') return [[i, j, k], [i + 1, j, k], [i, j, k + 1], [i + 1, j, k + 1]];
-  return [[i, j, k], [i + 1, j, k], [i, j + 1, k], [i + 1, j + 1, k]];
+  const x = i * STEP, y = j * STEP, z = k * STEP;
+  if (p.plane === 'x') return [[x, y, z], [x, y + a, z], [x, y, z + b], [x, y + a, z + b]];
+  if (p.plane === 'y') return [[x, y, z], [x + a, y, z], [x, y, z + b], [x + a, y, z + b]];
+  return [[x, y, z], [x + a, y, z], [x, y + b, z], [x + a, y + b, z]];
 }
-// Returns the common boundary segment when two lattice squares share an edge.
+
+// Lattice-unit corners: the physical corners lying on the 12" grid. A 16"
+// dimension never lands on the lattice, so sized panels expose only their
+// 12-inch-edge corners — exactly the points that can host connectors.
+export function panelCorners(p: Placement): Corner[] {
+  return panelCornersIn(p)
+    .filter((c) => c.every((v) => v % STEP === 0))
+    .map((c) => [c[0] / STEP, c[1] / STEP, c[2] / STEP] as Corner);
+}
+// Returns the common boundary segment when two panels share a full edge.
 // One shared corner is merely a diagonal connection; four means the same square.
 export function sharedPanelEdge(a: Placement, b: Placement): [Corner, Corner] | null {
-  const bCorners = new Set(panelCorners(b).map(pointKey));
-  const shared = panelCorners(a).filter((corner) => bCorners.has(pointKey(corner)));
+  const bCorners = new Set(panelCornersIn(b).map(pointKey));
+  const shared = panelCornersIn(a).filter((corner) => bCorners.has(pointKey(corner)));
   return shared.length === 2 ? [shared[0], shared[1]] : null;
 }
 
 export function panelCenter(p: Placement): Corner {
-  const h = STEP / 2;
-  if (p.plane === 'x') return [p.i * STEP, p.j * STEP + h, p.k * STEP + h];
-  if (p.plane === 'y') return [p.i * STEP + h, p.j * STEP, p.k * STEP + h];
-  return [p.i * STEP + h, p.j * STEP + h, p.k * STEP];
-}
-
-// Top-right corner used to anchor the hover-delete button for custom panels.
-export function panelMaxCorner(p: Placement): Corner {
-  const { i, j, k } = p;
-  if (p.plane === 'x') return [i * STEP, (j + 1) * STEP, (k + 1) * STEP];
-  if (p.plane === 'y') return [(i + 1) * STEP, j * STEP, (k + 1) * STEP];
-  return [(i + 1) * STEP, (j + 1) * STEP, k * STEP];
+  const [a, b] = panelSpan(p);
+  if (p.plane === 'x') return [p.i * STEP, p.j * STEP + a / 2, p.k * STEP + b / 2];
+  if (p.plane === 'y') return [p.i * STEP + a / 2, p.j * STEP, p.k * STEP + b / 2];
+  return [p.i * STEP + a / 2, p.j * STEP + b / 2, p.k * STEP];
 }
 
 function touchesCorner(p: Placement, c: Corner): boolean {
-  const near = (min: number, cv: number) => min === cv || min + 1 === cv;
-  if (p.plane === 'x') return p.i === c[0] && near(p.j, c[1]) && near(p.k, c[2]);
-  if (p.plane === 'y') return p.j === c[1] && near(p.i, c[0]) && near(p.k, c[2]);
-  return p.k === c[2] && near(p.i, c[0]) && near(p.j, c[1]);
+  const near = (min: number, cv: number, extent: number) => min === cv || min + extent === cv;
+  const [a, b] = panelSpan(p);
+  const { i, j, k } = p;
+  if (p.plane === 'x') return i * STEP === c[0] * STEP && near(j * STEP, c[1] * STEP, a) && near(k * STEP, c[2] * STEP, b);
+  if (p.plane === 'y') return j * STEP === c[1] * STEP && near(i * STEP, c[0] * STEP, a) && near(k * STEP, c[2] * STEP, b);
+  return k * STEP === c[2] * STEP && near(i * STEP, c[0] * STEP, a) && near(j * STEP, c[1] * STEP, b);
 }
+
 
 // Extent direction of a panel from a shared corner along an axis (0=i,1=j,2=k).
 function quad(p: Placement, c: Corner, axis: 0 | 1 | 2): 1 | -1 {
@@ -214,6 +252,37 @@ export function chooseOrientation(panels: Placement[], c: Corner, tableLength = 
   return { ...chosen, turn: connectorTurn(panels, chosen) };
 }
 
+// Axis-aligned sheet intersection. Each panel is a zero-thickness sheet on
+// its plane axis. Two panels conflict when their sheets cross: either they
+// are coplanar with a positive-area overlap, or one sheet's plane lies
+// strictly inside the other's extent (a deck slicing through a wall).
+// Edge and corner contact stay legal.
+function panelIntervals(p: Placement): Array<[number, number]> {
+  const [a, b] = panelSpan(p);
+  const pos = [p.i * STEP, p.j * STEP, p.k * STEP];
+  const planeAxis = p.plane === 'x' ? 0 : p.plane === 'y' ? 1 : 2;
+  return [0, 1, 2].map((axis) => {
+    if (axis === planeAxis) return [pos[axis], pos[axis]] as [number, number];
+    const ext = p.plane === 'x' ? (axis === 1 ? a : b) : p.plane === 'y' ? (axis === 0 ? a : b) : (axis === 0 ? a : b);
+    return [pos[axis], pos[axis] + ext] as [number, number];
+  });
+}
+
+export function panelsOverlap(a: Placement, b: Placement): boolean {
+  const A = panelIntervals(a), B = panelIntervals(b);
+  for (let axis = 0; axis < 3; axis++) {
+    if (Math.max(A[axis]![0], B[axis]![0]) > Math.min(A[axis]![1], B[axis]![1])) return false;
+  }
+  const inside = (pos: number, [lo, hi]: [number, number]) => pos > lo && pos < hi;
+  const thinA = a.plane === 'x' ? 0 : a.plane === 'y' ? 1 : 2;
+  const thinB = b.plane === 'x' ? 0 : b.plane === 'y' ? 1 : 2;
+  if (thinA === thinB) {
+    const others = [0, 1, 2].filter((axis) => axis !== thinA);
+    return others.every((axis) => Math.max(A[axis]![0], B[axis]![0]) < Math.min(A[axis]![1], B[axis]![1]));
+  }
+  return inside(A[thinA]![0], B[thinA]!) || inside(B[thinB]![0], A[thinB]!);
+}
+
 export class World {
   panels = new Map<string, Panel>();
   connectors = new Map<string, Connector>();
@@ -241,6 +310,9 @@ export class World {
   canPlace(s: Placement): boolean {
     if (s.j < 0) return false;
     if (this.panels.has(panelKey(s))) return false;
+    for (const existing of this.panels.values()) {
+      if (panelsOverlap(s, existing)) return false;
+    }
     for (const c of panelCorners(s)) {
       const existing = this.panelsAt(c);
       if (existing.length > 0 && validOrientations([...existing, s], c).length === 0) return false;
@@ -371,6 +443,7 @@ export class World {
         || !Number.isInteger(panel.i) || !Number.isInteger(panel.j) || !Number.isInteger(panel.k)
         || !Number.isInteger(panel.id) || !types.has(panel.typeId)
       ) return false;
+      if (panel.span !== undefined && !isValidSpan(panel.span)) return false;
       const key = panelKey(panel);
       if (panels.has(key)) return false;
       panels.set(key, { ...panel });
@@ -405,19 +478,21 @@ export class World {
     }
     return true;
   }
-
-  // All empty squares connectable to some placed panel corner.
-  candidates(): Placement[] {
+  // Empty connectable squares for the active panel size. Candidates are
+  // deduplicated per lattice anchor regardless of span, and each carries the
+  // active size's span so validity (overlap included) is judged as placed.
+  candidates(size: SizeMode = '12x12'): Placement[] {
     const seen = new Set<string>();
     const out: Placement[] = [];
     for (const panel of this.panels.values()) {
       for (const c of panelCorners(panel)) {
         for (const s of squaresAtCorner(c)) {
           if (s.j < 0) continue;
-          const key = panelKey(s);
-          if (seen.has(key) || this.panels.has(key)) continue;
-          seen.add(key);
-          if (this.canPlace(s)) out.push(s);
+          const withSpan: Placement = { ...s, span: spanForSize(s.plane, size) };
+          const base = baseKey(s);
+          if (seen.has(base)) continue;
+          seen.add(base);
+          if (this.canPlace(withSpan)) out.push(withSpan);
         }
       }
     }
