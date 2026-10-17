@@ -3,13 +3,16 @@ import { expect, test, type Page } from '@playwright/test';
 // State seam exposed by the app (read-only): panels, connectors, camera, debug pick.
 interface Builder {
   world: {
-    panels: Map<string, { plane: string; i: number; j: number; k: number; typeId: string }>;
+    panels: Map<string, { plane: string; i: number; j: number; k: number; typeId: string; span?: [number, number] }>;
     connectors: Map<string, { plane: string; sign: number }>;
     types: Map<string, { id: string; custom: boolean }>;
     activeTypeId: string;
     selectedKey: string | null;
     tableLength: number;
-    candidates(): Array<{ plane: string; i: number; j: number; k: number }>;
+    candidates(size?: string): Array<{ plane: string; i: number; j: number; k: number }>;
+    canPlace(p: { plane: string; i: number; j: number; k: number; span?: [number, number] }): boolean;
+    toJSON(): unknown;
+    restore(state: unknown): boolean;
   };
   sceneCtx: {
     camera: { position: { toArray(): number[] } };
@@ -444,6 +447,73 @@ async function clickProjected(page: Page, objectExpression: string): Promise<voi
   }, objectExpression);
   await page.mouse.click(point.x, point.y);
 }
+test('16-inch panel sizes place span-keyed panels and reject overlaps', async ({ page }) => {
+  const box = await canvasBox(page);
+
+  // Switch to 12x16 (16 vertical): the deck is keyed with its span.
+  await page.locator('.size-btn[data-size="12x16"]').click();
+  await page.mouse.move(box.x + box.width * 0.42, box.y + box.height * 0.55, { steps: 3 });
+  await page.mouse.down({ button: 'left' });
+  await page.mouse.up({ button: 'left' });
+  await page.waitForTimeout(150);
+  let state = await page.evaluate(() => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    const entries = [...b.world.panels.entries()];
+    const mesh = [...b.sceneCtx.panelGroup.children][0] as THREE.MeshLike | undefined;
+    return { keys: entries.map(([k, p]) => ({ key: k, span: p.span })), connectors: b.world.connectors.size, scale: mesh ? [mesh.scale.x, mesh.scale.z] : null };
+  });
+  expect(state.keys).toEqual([expect.objectContaining({ key: expect.stringMatching(/y:[-0-9,]+@12x16/), span: [12, 16] })]);
+  expect(state.scale).toEqual([1, 16 / 12]);
+
+  // Switch to 16x12 (16 horizontal) and place a second deck. The cursor
+  // travels in steps so the previous hover's edge latch is extinguished the
+  // way a real mouse would (single-step teleporting moves keep the latch).
+  await page.locator('.size-btn[data-size="16x12"]').click();
+  const spot = await page.evaluate(() => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    const o = { x: 0, y: 0, visible: false };
+    b.sceneCtx.projectToScreen([64, 0, 6], o, document.getElementById('viewport'));
+    const rect = b.sceneCtx.renderer.domElement.getBoundingClientRect();
+    return o.visible ? { x: o.x + rect.left, y: o.y + rect.top } : null;
+  });
+  if (!spot) throw new Error('table spot not projected');
+  // The size switch already cleared any edge latch, so a direct move lands
+  // on a clean table candidate; spot is far from the first deck's edges.
+  await page.mouse.move(spot.x, spot.y, { steps: 4 });
+  await page.mouse.down({ button: 'left' });
+  await page.mouse.up({ button: 'left' });
+  await page.waitForTimeout(150);
+  state = await page.evaluate(() => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    return [...b.world.panels.entries()].map(([k, p]) => ({ key: k, span: p.span }));
+  });
+  expect(state).toEqual(expect.arrayContaining([
+    expect.objectContaining({ key: expect.stringMatching(/@16x12/), span: [16, 12] }),
+  ]));
+
+  // An overlapping placement is invalid: a tall panel over an occupied anchor
+  // (different span, same lattice square) must be rejected by canPlace.
+  const overlap = await page.evaluate(() => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    const wide = [...b.world.panels.values()].find((p) => p.span?.[0] === 16);
+    if (!wide) return null;
+    return b.world.canPlace({ plane: wide.plane, i: wide.i, j: wide.j, k: wide.k, span: [12, 16] });
+  });
+
+  // The active size survives a reload, and spans survive the share snapshot.
+  const roundTrip = await page.evaluate(() => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    const json = JSON.parse(JSON.stringify(b.world.toJSON()));
+    return { ok: b.world.restore(json), keys: [...b.world.panels.keys()] };
+  });
+  expect(roundTrip.ok).toBe(true);
+  expect(roundTrip.keys.filter((k: string) => k.includes('@')).length).toBe(2);
+  await page.reload();
+  await page.waitForSelector('#viewport canvas');
+  const active = await page.locator('.size-btn.active').getAttribute('data-size');
+  expect(active).toBe('16x12');
+});
+
 test('normal mode hovers a marker to preview the placement ghost', async ({ page }) => {
   // Normal mode: place a panel, tap it again to surface the blue marker
   // previews, then hovering a marker shows the placement ghost.

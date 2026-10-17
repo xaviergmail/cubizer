@@ -1,4 +1,4 @@
-import type { Panel, PanelType } from './model';
+import { SIZE_MODES, type Panel, type PanelType, type SizeMode } from './model';
 
 export type MaterialTarget = 'metal' | 'connector';
 
@@ -21,6 +21,7 @@ export interface UICallbacks {
   onRedo(): void;
   onTypePointerDown(id: string, event: PointerEvent): void;
   onResetView(): void;
+  onSizeSelect(mode: SizeMode): void;
 }
 
 const TRASH_ICON = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
@@ -67,12 +68,14 @@ type ColorTarget =
 interface CountType extends PanelType { count: number; }
 
 export class UI {
+  private sizeButtons: Array<{ el: HTMLButtonElement; mode: SizeMode }> = [];
   private typeList: HTMLDivElement;
   private addBtn: HTMLButtonElement;
   private selectedTrash: HTMLButtonElement;
   private dumpBtn: HTMLButtonElement;
   private quickBtn: HTMLButtonElement;
   private materialButtons = new Map<MaterialTarget, HTMLButtonElement>();
+
   private status: HTMLDivElement;
   private statusTimer: number | undefined;
   private tableButtons: Array<{ el: HTMLButtonElement; len: number }> = [];
@@ -95,6 +98,31 @@ export class UI {
   private dragChipLabel: HTMLSpanElement;
 
   constructor(sidebar: HTMLElement, viewport: HTMLElement, private cbs: UICallbacks) {
+    const sizeSection = document.createElement('section');
+    sizeSection.className = 'size-controls';
+    sizeSection.setAttribute('aria-label', 'Panel size');
+    const sizeTitles: Record<SizeMode, string> = {
+      '12x12': '12 in × 12 in panel',
+      '12x16': '12 in wide × 16 in tall (16 vertical)',
+      '16x12': '16 in wide × 12 in tall (16 horizontal)',
+    };
+    for (const mode of SIZE_MODES) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'size-btn';
+      btn.textContent = mode.replace('x', '×');
+      btn.dataset.size = mode;
+      btn.title = sizeTitles[mode];
+      btn.setAttribute('aria-label', sizeTitles[mode]);
+      btn.addEventListener('click', () => {
+        this.setSizeMode(mode);
+        this.cbs.onSizeSelect(mode);
+      });
+      sizeSection.appendChild(btn);
+      this.sizeButtons.push({ el: btn, mode });
+    }
+    sidebar.appendChild(sizeSection);
+
     this.typeList = document.createElement('div');
     this.typeList.className = 'type-list';
     sidebar.appendChild(this.typeList);
@@ -487,6 +515,7 @@ export class UI {
     header.append(title, close);
     const steps = [
       ['Navigate', 'Drag with one finger or the left mouse button to orbit. Two fingers pan or pinch to zoom; the mouse wheel also zooms.'],
+      ['Panel sizes', 'Pick a panel size in the sidebar: the standard 12×12, a 12×16 with the 16-inch edge vertical, or a 16×12 lying wide. A 16-inch dimension leaves the 12-inch connector grid, so those panels connect only along their 12-inch edges.'],
       ['Place panels', 'Normal mode: tap the table once to place a panel, or tap a panel then tap one of the blue possible-panel previews (the preview under your cursor is outlined). Hold and drag to paint panels across the table and previews. Impossible placements are never shown.'],
       ['Drag to build', 'Drag any panel type from the sidebar onto the table to place it there, or onto a placed panel to re-type that panel.'],
       ['Connectors', 'Connectors are placed and aligned automatically. Free table-edge connectors face inward toward the chair.'],
@@ -707,6 +736,10 @@ export class UI {
     connectors.innerHTML = `<i class="connector-count-icon fa-solid fa-puzzle-piece" aria-hidden="true"></i><strong>${connectorCount}</strong>`;
     this.countBar.append(divider, connectors);
     this.countBar.setAttribute('aria-label', `${counts.map((type) => `${type.id}: ${type.count}`).join(', ')}; connectors: ${connectorCount}`);
+  }
+
+  setSizeMode(mode: SizeMode): void {
+    for (const { el, mode: m } of this.sizeButtons) el.classList.toggle('active', m === mode);
   }
 
   setTableActive(len: number): void {
