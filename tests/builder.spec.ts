@@ -43,6 +43,38 @@ test.beforeEach(async ({ page }) => {
   // normal-mode coverage explicitly toggles this back off.
   await page.locator('.quick-mode-btn').click();
 });
+test('compact share link restores panels and is far smaller than JSON', async ({ page }) => {
+  await page.goto('/');
+  await page.waitForSelector('#viewport canvas');
+  const codec = await page.evaluate(async () => {
+    const b = (window as unknown as { __builder: Builder }).__builder;
+    // Build a mixed assembly: 16 std decks + 4 standing 16-talls.
+    for (let k = -2; k <= 1; k++) {
+      for (let i = 0; i < 4; i++) {
+        // Alternate deck rows between std-deep and 16-deep decks.
+        void b.world.place({ plane: 'y', i, j: 0, k, span: k % 2 === 0 ? [12, 16] : [12, 12] }, 'plain', true);
+      }
+    }
+    for (let i = 0; i < 4; i++) void b.world.place({ plane: 'z', i, j: 0, k: 0, span: [12, 16] }, 'plain', true);
+    const state = b.world.toJSON();
+    state.metalColor = '#7a3e2a';
+    const packed = await b.codec.encode(state);
+    const decoded = await b.codec.decode(packed);
+    return { packed, json: JSON.stringify(state), decoded, panels: state.panels.length };
+  });
+  expect(codec.packed.startsWith('Q1VC')).toBe(true); // 'CUB' base64url prefix
+  expect(codec.packed.length).toBeLessThan(codec.json.length / 4);
+  expect(codec.decoded).not.toBeNull();
+  expect(codec.decoded?.panels).toHaveLength(codec.panels);
+  expect(codec.decoded?.metalColor).toBe('#7a3e2a');
+
+  // A packed fragment restores the full assembly after reload.
+  await page.goto(`/#assembly=${codec.packed}`);
+  await page.waitForSelector('#viewport canvas');
+  await page.waitForTimeout(500);
+  const restored = await page.evaluate(() => (window as unknown as { __builder: Builder }).__builder.world.panels.size);
+  expect(restored).toBe(codec.panels);
+});
 
 test('sidebar shows the 3 default panel types without remove buttons', async ({ page }) => {
   const ids = await page.locator('.type-btn').evaluateAll((els) => els.map((el) => el.getAttribute('data-type-id')));
@@ -626,9 +658,13 @@ test('global material controls and share button serialize global finishes', asyn
     });
   });
   await page.getByRole('button', { name: 'Share' }).click();
+  // The share handler encodes asynchronously now; the attribute lands a
+  // tick after the click.
+  await expect.poll(async () => await page.locator('html').getAttribute('data-share-url'), { timeout: 5_000 })
+    .toMatch(/^http:\/\/[^\s]+$/);
   const share = new URL(await page.locator('html').getAttribute('data-share-url')!);
-  expect(share.searchParams.has('assembly')).toBe(false);
-  const assembly = JSON.parse(new URLSearchParams(share.hash.slice(1)).get('assembly')!);
+  // Packed binary link; decode with the app's codec to inspect finishes.
+  const assembly = await page.evaluate((raw) => (window as any).__builder.codec.decode(raw), share.hash.slice(1).replace(/^assembly=/, ''));
   expect(assembly).toMatchObject({ metalColor: '#3b82f6', connectorColor: '#ef4444' });
 });
 

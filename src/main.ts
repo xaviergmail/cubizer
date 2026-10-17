@@ -10,6 +10,7 @@ import {
   type AssemblyState,
   type Placement,
 } from './model';
+import { decodeAssemblyLink, encodeAssemblyLink } from './codec';
 import { SceneCtx, loadPanelAssets, connectorAnchors } from './scene';
 import { UI } from './ui';
 
@@ -24,27 +25,42 @@ const DESIGN_INDEX_KEY = 'artist-alley-display-builder:designs-v1';
 const DESIGN_KEY_PREFIX = 'artist-alley-display-builder:design-v1:';
 const QUICK_MODE_KEY = 'artist-alley-display-builder:quick-mode';
 
-function restoreFromUrl(target: World): boolean {
+async function restoreFromUrl(target: World): Promise<boolean> {
   const url = new URL(window.location.href);
   const hashState = new URLSearchParams(url.hash.slice(1)).get(SHARE_PARAM);
   // Read an existing query-link once; the first refresh rewrites it into the
   // fragment form below, so newly copied URLs never put state in a request.
   const raw = hashState ?? url.searchParams.get(SHARE_PARAM);
   if (!raw) return false;
-  try {
-    return target.restore(JSON.parse(raw) as AssemblyState);
-  } catch {
-    return false;
+  // Legacy links carry the JSON snapshot verbatim; new links are the packed
+  // base64url format produced by encodeAssemblyLink.
+  if (raw.startsWith('{')) {
+    try {
+      return target.restore(JSON.parse(raw) as AssemblyState);
+    } catch {
+      return false;
+    }
   }
+  const state = await decodeAssemblyLink(raw);
+  return state ? target.restore(state) : false;
+}
+
+// The fragment is rewritten after every mutation. Encoding is async (deflate
+// streams), so keep a token: only the latest encode may replace the URL.
+let shareUrlToken = 0;
+
+function placeShareFragment(raw: string): void {
+  const url = new URL(window.location.href);
+  url.searchParams.delete(SHARE_PARAM);
+  url.hash = `${SHARE_PARAM}=${raw}`;
+  history.replaceState(null, '', url);
 }
 
 function syncUrl(target: World): void {
-  const url = new URL(window.location.href);
-  // Fragments are deliberately excluded from HTTP requests, avoiding
-  // oversized request headers for large shared assemblies.
-  url.searchParams.delete(SHARE_PARAM);
-  url.hash = new URLSearchParams([[SHARE_PARAM, JSON.stringify(target.toJSON())]]).toString();
-  history.replaceState(null, '', url);
+  const token = ++shareUrlToken;
+  void encodeAssemblyLink(target.toJSON()).then((raw) => {
+    if (token === shareUrlToken) placeShareFragment(raw);
+  }).catch(() => {});
 }
 
 let defaultPlainColor = '#000000';
@@ -57,7 +73,19 @@ function seedDefaultTypes(target: World): void {
 
 const world = new World();
 seedDefaultTypes(world);
-const restoredFromUrl = restoreFromUrl(world);
+let restoredFromUrl = false;
+void restoreFromUrl(world).then((restored) => {
+  restoredFromUrl = restored;
+  if (!restored) return;
+  // The scene already rendered the seed world; apply the restored table and
+  // make the restored state the undo baseline (history initialized before
+  // the async restore landed).
+  sceneCtx.setTableLength(world.tableLength);
+  assemblyHistory.splice(0, assemblyHistory.length, world.toJSON());
+  historyPointer = 0;
+  ui.setHistoryState(false, false);
+  refresh();
+});
 const sceneCtx = new SceneCtx(viewport);
 const canvas = sceneCtx.renderer.domElement;
 sceneCtx.setTableLength(world.tableLength);
@@ -627,7 +655,10 @@ async function copyAssemblyJson(): Promise<boolean> {
 }
 
 async function copyShareUrl(): Promise<boolean> {
-  syncUrl(world);
+  // Encode the CURRENT state so the clipboard can never trail the fragment
+  // write (syncUrl is async; its replaceState may not have landed yet).
+  const raw = await encodeAssemblyLink(world.toJSON());
+  placeShareFragment(raw);
   return copyText(window.location.href, 'share URL');
 }
 
@@ -1200,7 +1231,7 @@ function debugInfo(): {
 }
 
 
- (window as unknown as Record<string, unknown>).__builder = { world, sceneCtx, undo: undoHistory, redo: redoHistory, get undoDepth() { return historyPointer; }, get redoDepth() { return assemblyHistory.length - 1 - historyPointer; }, startTypeDrag, debug: { info: debugInfo, raycaster, ndc, setNdc, updateHover, get anchors() { return connectorAnchors; }, get gesture() { return { camDragging, touchGesture, activePointerCount: activePointers.size, normalCandidateCount: normalCandidates.size }; } } };
+(window as unknown as Record<string, unknown>).__builder = { world, sceneCtx, undo: undoHistory, redo: redoHistory, get undoDepth() { return historyPointer; }, get redoDepth() { return assemblyHistory.length - 1 - historyPointer; }, startTypeDrag, codec: { encode: encodeAssemblyLink, decode: decodeAssemblyLink }, debug: { info: debugInfo, raycaster, ndc, setNdc, updateHover, get anchors() { return connectorAnchors; }, get gesture() { return { camDragging, touchGesture, activePointerCount: activePointers.size, normalCandidateCount: normalCandidates.size }; } } };
 
 loadPanelAssets().then((defaults) => {
   if (defaults) {
